@@ -59,10 +59,10 @@ for (const targetBranch of branches) {
   core.info(`========================================`);
   const backportBranch = `backport-${prNumber}-to-${targetBranch}`;
   try {
-    // Create backport branch from target release branch
-    core.info(`Creating branch ${backportBranch} from ${targetBranch}`);
+    // Create/reset backport branch from target release branch
+    core.info(`Creating/resetting branch ${backportBranch} from ${targetBranch}`);
     execSync(`git fetch origin ${targetBranch}:${targetBranch}`, { stdio: 'inherit' });
-    execSync(`git checkout ${backportBranch} || git checkout -b ${backportBranch} ${targetBranch}`, { stdio: 'inherit' });
+    execSync(`git checkout -B ${backportBranch} ${targetBranch}`, { stdio: 'inherit' });
     // Cherry-pick each commit from the PR
     let hasConflicts = false;
     for (let i = 0; i < commits.length; i++) {
@@ -89,6 +89,10 @@ for (const targetBranch of branches) {
             // If continue fails, make a simple commit
             execSync(`git commit --no-edit --allow-empty-message || git commit -m "Cherry-pick ${commitSha} (with conflicts)"`, { stdio: 'inherit' });
           }
+        } else if (error.message && error.message.includes('previous cherry-pick is now empty')) {
+          // Handle empty commits (changes already exist in target branch)
+          core.info(`Commit ${commitSha.substring(0, 7)} is empty (changes already in target branch), skipping`);
+          execSync('git cherry-pick --skip', { stdio: 'inherit' });
         } else {
           throw error;
         }
