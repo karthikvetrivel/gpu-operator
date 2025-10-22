@@ -89,6 +89,10 @@ for (const targetBranch of branches) {
             // If continue fails, make a simple commit
             execSync(`git commit --no-edit --allow-empty-message || git commit -m "Cherry-pick ${commitSha} (with conflicts)"`, { stdio: 'inherit' });
           }
+        } else if (error.message && error.message.includes('previous cherry-pick is now empty')) {
+          // Handle empty commits (changes already exist in target branch)
+          core.info(`Commit ${commitSha.substring(0, 7)} is empty (changes already in target branch), skipping`);
+          execSync('git cherry-pick --skip', { stdio: 'inherit' });
         } else {
           throw error;
         }
