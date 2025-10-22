@@ -10,4 +10,8 @@
 >>>>>>> 5fcb779e (test: e2e verification - second commit)
 =======
 # E2E Test - Commit 3
+<<<<<<< HEAD
 >>>>>>> 163390e4 (test: e2e verification - third commit)
+=======
+# E2E Test - Commit 4
+>>>>>>> cfaeb7fc (test: e2e verification - fourth commit)
