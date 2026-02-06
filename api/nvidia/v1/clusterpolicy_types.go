@@ -944,6 +944,13 @@ type DCGMExporterSpec struct {
 	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors.displayName="HPC Job Mapping Configuration"
 	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors.x-descriptors="urn:alm:descriptor:com.tectonic.ui:advanced"
 	HPCJobMapping *DCGMExporterHPCJobMappingConfig `json:"hpcJobMapping,omitempty"`
+
+	// Optional: Pod metrics enrichment configuration for DCGM Exporter
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors=true
+	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors.displayName="Pod Metrics Configuration"
+	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors.x-descriptors="urn:alm:descriptor:com.tectonic.ui:advanced"
+	PodMetrics *DCGMExporterPodMetricsConfig `json:"podMetrics,omitempty"`
 }
 
 // DCGMExporterHPCJobMappingConfig defines HPC job mapping configuration for NVIDIA DCGM Exporter
@@ -962,6 +969,18 @@ type DCGMExporterHPCJobMappingConfig struct {
 	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors.displayName="Job Mapping Directory"
 	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors.x-descriptors="urn:alm:descriptor:com.tectonic.ui:text"
 	Directory string `json:"directory,omitempty"`
+}
+
+// DCGMExporterPodMetricsConfig defines pod metrics enrichment configuration for DCGM Exporter
+type DCGMExporterPodMetricsConfig struct {
+	// EnablePodLabels enables Kubernetes pod labels in metrics.
+	// When enabled, metrics will include labels from pods using GPUs.
+	// This requires cluster-wide read permissions to pods.
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors=true
+	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors.displayName="Enable Pod Labels in Metrics"
+	// +operator-sdk:gen-csv:customresourcedefinitions.specDescriptors.x-descriptors="urn:alm:descriptor:com.tectonic.ui:booleanSwitch"
+	EnablePodLabels *bool `json:"enablePodLabels,omitempty"`
 }
 
 // DCGMExporterMetricsConfig defines metrics to be collected by NVIDIA DCGM Exporter
@@ -2009,6 +2028,14 @@ func (e *DCGMExporterSpec) GetHPCJobMappingDirectory() string {
 		return ""
 	}
 	return e.HPCJobMapping.Directory
+}
+
+// IsPodLabelsEnabled returns true if pod label enrichment is enabled for DCGM Exporter
+func (e *DCGMExporterSpec) IsPodLabelsEnabled() bool {
+	if e.PodMetrics == nil || e.PodMetrics.EnablePodLabels == nil {
+		return false
+	}
+	return *e.PodMetrics.EnablePodLabels
 }
 
 // IsEnabled returns true if gpu-feature-discovery is enabled(default) through gpu-operator
