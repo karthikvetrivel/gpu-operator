@@ -39,6 +39,8 @@ import (
 
 	gpuv1 "github.com/NVIDIA/gpu-operator/api/nvidia/v1"
 	nvidiav1alpha1 "github.com/NVIDIA/gpu-operator/api/nvidia/v1alpha1"
+	"github.com/NVIDIA/gpu-operator/internal/conditions"
+	"github.com/NVIDIA/gpu-operator/internal/state"
 	"github.com/NVIDIA/gpu-operator/internal/validator"
 )
 
@@ -130,14 +132,14 @@ func TestReconcile(t *testing.T) {
 			expectedLog: "useNvidiaDriverCRD is not enabled in ClusterPolicy",
 		},
 		{
-			name:             "driver CRD false but GPUCluster exists → reconciliation proceeds",
+			name:             "driver CRD false with GPUCluster → reconciliation still skips driver",
 			useCRD:           ptr.To(false),
 			gpuClusterExists: true,
 			validator: &FakeNodeSelectorValidator{
 				CustomError: errors.New("fake list error"),
 			},
 			error:       nil,
-			expectedLog: "nodeSelector validation failed",
+			expectedLog: "useNvidiaDriverCRD is not enabled in ClusterPolicy",
 		},
 		{
 			name:   "ClusterPolicy has driver CRD true but validator errors",
@@ -238,6 +240,92 @@ func TestReconcile(t *testing.T) {
 	}
 }
 
+// TestReconcileStandalone covers the no-ClusterPolicy path: the controller falls back
+// to the GPUCluster for the cluster-wide configuration, and fails early when
+// neither object exists.
+func TestReconcileStandalone(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiav1alpha1.AddToScheme(scheme))
+	require.NoError(t, gpuv1.AddToScheme(scheme))
+
+	cp := &gpuv1.ClusterPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster-policy"},
+		Spec: gpuv1.ClusterPolicySpec{
+			Driver: gpuv1.DriverSpec{
+				UseNvidiaDriverCRD: ptr.To(true),
+			},
+			HostPaths: gpuv1.HostPathsSpec{RootFS: "/cp-root"},
+		},
+	}
+	gpuCluster := &nvidiav1alpha1.GPUCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "gpu-cluster-config"},
+	}
+
+	tests := []struct {
+		name             string
+		objects          []client.Object
+		expectedHostRoot string
+	}{
+		{
+			name:             "GPUCluster present, host root hardcoded",
+			objects:          []client.Object{gpuCluster},
+			expectedHostRoot: "/",
+		},
+		{
+			name:             "GPUCluster present alongside ClusterPolicy, host root hardcoded",
+			objects:          []client.Object{cp, gpuCluster},
+			expectedHostRoot: "/",
+		},
+		{
+			name:             "ClusterPolicy only, host root from spec.hostPaths.rootFS",
+			objects:          []client.Object{cp},
+			expectedHostRoot: "/cp-root",
+		},
+		{
+			name:             "neither ClusterPolicy nor GPUCluster, host root defaults to /",
+			expectedHostRoot: "/",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			driver := &nvidiav1alpha1.NVIDIADriver{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-driver"},
+			}
+
+			c := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(append([]client.Object{driver}, tc.objects...)...).
+				WithStatusSubresource(&nvidiav1alpha1.NVIDIADriver{}).
+				Build()
+
+			updater := &FakeConditionUpdater{}
+			stateManager := &fakeStateManager{results: state.Results{Status: state.SyncStateReady}}
+
+			reconciler := &NVIDIADriverReconciler{
+				Client:                c,
+				Scheme:                scheme,
+				conditionUpdater:      updater,
+				nodeSelectorValidator: &FakeNodeSelectorValidator{},
+				stateManager:          stateManager,
+			}
+
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: driver.Name}}
+			_, err := reconciler.Reconcile(context.Background(), req)
+
+			require.NoError(t, err)
+
+			hostRoot, ok := stateManager.lastCatalog.Get(state.InfoTypeHostRoot).(string)
+			require.True(t, ok, "info catalog must hold a host root string")
+			require.Equal(t, tc.expectedHostRoot, hostRoot)
+
+			instance := &nvidiav1alpha1.NVIDIADriver{}
+			require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: driver.Name}, instance))
+			require.Equal(t, nvidiav1alpha1.Ready, instance.Status.State)
+		})
+	}
+}
+
 func TestReconcileConflictSetsNotReadyState(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, nvidiav1alpha1.AddToScheme(scheme))
@@ -284,6 +372,43 @@ func TestReconcileConflictSetsNotReadyState(t *testing.T) {
 	_, err := reconciler.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 	require.Equal(t, nvidiav1alpha1.NotReady, updater.LastErrorState)
+}
+
+func TestUpdateCrStatusPreservesNotReadyStateWhenSettingErrorCondition(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiav1alpha1.AddToScheme(scheme))
+
+	driver := &nvidiav1alpha1.NVIDIADriver{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-driver"},
+		Status:     nvidiav1alpha1.NVIDIADriverStatus{State: nvidiav1alpha1.Ready},
+	}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(driver).
+		WithStatusSubresource(driver).
+		Build()
+	reconciler := &NVIDIADriverReconciler{Client: k8sClient}
+
+	require.NoError(t, reconciler.updateCrStatus(context.Background(), driver, state.Results{
+		Status: state.SyncStateNotReady,
+	}))
+	require.Equal(t, nvidiav1alpha1.NotReady, driver.Status.State)
+
+	updater := conditions.NewNvDriverUpdater(k8sClient)
+	require.NoError(t, updater.SetConditionsError(
+		context.Background(), driver, conditions.DriverNotReady, "Waiting for driver pod to be ready"))
+
+	updated := &nvidiav1alpha1.NVIDIADriver{}
+	require.NoError(t, k8sClient.Get(context.Background(), types.NamespacedName{Name: driver.Name}, updated))
+	require.Equal(t, nvidiav1alpha1.NotReady, updated.Status.State)
+	require.Conditionf(t, func() bool {
+		for _, condition := range updated.Status.Conditions {
+			if condition.Type == conditions.Error && condition.Status == metav1.ConditionTrue {
+				return true
+			}
+		}
+		return false
+	}, "expected an Error=True condition")
 }
 
 func TestEnqueueAllNVIDIADrivers(t *testing.T) {
